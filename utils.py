@@ -1,0 +1,138 @@
+import pandas as pd
+import os
+import numpy as np
+from sklearn.model_selection import cross_val_score, cross_val_predict, KFold
+from sklearn.linear_model import Ridge
+from sklearn.metrics import make_scorer, mean_squared_error, mean_absolute_error, r2_score
+
+
+def load_data(clinical_path='data/ClinicaGliomasDic2025.csv', 
+              gene_tpm_path='data/gene_tpm__GeneSymbol_reclasificado_TCGA_filtrado.csv'):
+    """
+    Load clinical and gene expression data and prepare input/output variables.
+    
+    Parameters:
+    -----------
+    clinical_path : str
+        Path to the clinical data CSV file
+    gene_tpm_path : str
+        Path to the gene TPM expression data CSV file
+    
+    Returns:
+    --------
+    X : pandas.DataFrame
+        Input features (gene expression data with TCGACodes as rows, genes as columns)
+    y : pandas.Series
+        Output variable (Age_at_diagnosis) aligned with X
+    """
+    # Load the data
+    df_clinical = pd.read_csv(clinical_path)
+    df_gene_tpm = pd.read_csv(gene_tpm_path)
+    
+    # Extract output variable (Age_at_diagnosis) from clinical data
+    # Use TCGACode as index for alignment
+    df_clinical_indexed = df_clinical.set_index('TCGACode')
+    y = df_clinical_indexed['Age_at_diagnosis']
+    
+    # The gene_tpm data has TCGACodes as columns
+    # Check if first column is gene names (index) or if it's already in the right format
+    # If first column is gene names, set it as index before transposing
+    if df_gene_tpm.columns[0] not in df_clinical['TCGACode'].values:
+        # First column is likely gene names, set it as index
+        df_gene_tpm = df_gene_tpm.set_index(df_gene_tpm.columns[0])
+    
+    # Transpose to have TCGACodes as rows (samples) and genes as columns (features)
+    X = df_gene_tpm.T
+    
+    # Get common TCGACodes between clinical and gene expression data
+    common_codes = y.index.intersection(X.index)
+    
+    # Filter to only common samples
+    X = X.loc[common_codes]
+    y = y.loc[common_codes]
+    
+    return X, y
+
+
+def cross_validate_regression(X, y, model=None, cv=5, scoring='r2', random_state=42):
+    """
+    Apply cross-validation to predict a continuous variable y using features X.
+    
+    Parameters:
+    -----------
+    X : pandas.DataFrame or numpy.ndarray
+        Input features (samples x features)
+    y : pandas.Series or numpy.ndarray
+        Output variable (continuous target)
+    model : sklearn estimator, optional
+        Regression model to use. If None, defaults to Ridge regression
+    cv : int or cross-validation generator, default=5
+        Number of folds for cross-validation
+    scoring : str or callable, default='r2'
+        Scoring metric to use. Common options:
+        - 'r2' (default)
+        - 'neg_mean_squared_error'
+        - 'neg_mean_absolute_error'
+        - 'neg_root_mean_squared_error'
+    random_state : int, default=42
+        Random state for reproducibility
+    
+    Returns:
+    --------
+    results : dict
+        Dictionary containing:
+        - 'scores': array of cross-validation scores
+        - 'mean_score': mean of cross-validation scores
+        - 'std_score': standard deviation of cross-validation scores
+        - 'predictions': array of predictions on test data (same dimensions as y)
+        - 'model': the fitted model (fitted on full data)
+        - 'cv': the cross-validation generator used
+    """
+    # Store original index if y is a pandas Series
+    y_index = y.index if isinstance(y, pd.Series) else None
+    
+    # Convert to numpy arrays if pandas objects
+    if isinstance(X, pd.DataFrame):
+        X_values = X.values
+    else:
+        X_values = X
+    
+    if isinstance(y, pd.Series):
+        y_values = y.values
+    else:
+        y_values = y
+    
+    # Default to Ridge regression if no model provided
+    if model is None:
+        model = Ridge(random_state=random_state)
+    
+    # Create cross-validation generator
+    if isinstance(cv, int):
+        cv_generator = KFold(n_splits=cv, shuffle=True, random_state=random_state)
+    else:
+        cv_generator = cv
+    
+    # Perform cross-validation to get scores
+    cv_scores = cross_val_score(model, X_values, y_values, cv=cv_generator, scoring=scoring, n_jobs=-1)
+    
+    # Get predictions on test data for each fold
+    y_pred = cross_val_predict(model, X_values, y_values, cv=cv_generator, n_jobs=-1)
+    
+    # Restore original index if y was a pandas Series
+    if y_index is not None:
+        y_pred = pd.Series(y_pred, index=y_index)
+    
+    # Fit model on full data for reference
+    model.fit(X_values, y_values)
+    
+    # Prepare results
+    results = {
+        'scores': cv_scores,
+        'mean_score': np.mean(cv_scores),
+        'std_score': np.std(cv_scores),
+        'predictions': y_pred,
+        'model': model,
+        'cv': cv_generator
+    }
+    
+    return results
