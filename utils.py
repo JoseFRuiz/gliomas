@@ -2,8 +2,8 @@ import pandas as pd
 import os
 import numpy as np
 from sklearn.model_selection import cross_val_score, cross_val_predict, KFold
-from sklearn.linear_model import Ridge
-from sklearn.metrics import make_scorer, mean_squared_error, mean_absolute_error, r2_score
+from sklearn.linear_model import Ridge, LogisticRegression
+from sklearn.metrics import make_scorer, mean_squared_error, mean_absolute_error, r2_score, confusion_matrix
 
 
 def load_data(clinical_path='data/ClinicaGliomasDic2025.csv', 
@@ -23,16 +23,16 @@ def load_data(clinical_path='data/ClinicaGliomasDic2025.csv',
     X : pandas.DataFrame
         Input features (gene expression data with TCGACodes as rows, genes as columns)
     y : pandas.Series
-        Output variable (Age_at_diagnosis) aligned with X
+        Output variable (Sobrevida_dias) aligned with X
     """
     # Load the data
     df_clinical = pd.read_csv(clinical_path)
     df_gene_tpm = pd.read_csv(gene_tpm_path)
     
-    # Extract output variable (Age_at_diagnosis) from clinical data
+    # Extract output variable (Sobrevida_dias) from clinical data
     # Use TCGACode as index for alignment
     df_clinical_indexed = df_clinical.set_index('TCGACode')
-    y = df_clinical_indexed['Age_at_diagnosis']
+    y = df_clinical_indexed['Sobrevida_dias']
     
     # The gene_tpm data has TCGACodes as columns
     # Check if first column is gene names (index) or if it's already in the right format
@@ -50,6 +50,11 @@ def load_data(clinical_path='data/ClinicaGliomasDic2025.csv',
     # Filter to only common samples
     X = X.loc[common_codes]
     y = y.loc[common_codes]
+    
+    # Remove samples with missing values in the target variable
+    valid_mask = ~y.isna()
+    X = X.loc[valid_mask]
+    y = y.loc[valid_mask]
     
     return X, y
 
@@ -131,6 +136,133 @@ def cross_validate_regression(X, y, model=None, cv=5, scoring='r2', random_state
         'mean_score': np.mean(cv_scores),
         'std_score': np.std(cv_scores),
         'predictions': y_pred,
+        'model': model,
+        'cv': cv_generator
+    }
+    
+    return results
+
+
+def binarize_y(y, threshold=365):
+    """
+    Binarize a continuous variable y based on a threshold.
+    
+    Parameters:
+    -----------
+    y : pandas.Series or numpy.ndarray
+        Continuous target variable to binarize
+    threshold : float, default=25
+        Threshold value for binarization. Values <= threshold become 0,
+        values > threshold become 1.
+    
+    Returns:
+    --------
+    y_binary : pandas.Series or numpy.ndarray
+        Binarized variable with same type and index as input y.
+        Values <= threshold are 0, values > threshold are 1.
+    """
+    # Store original index if y is a pandas Series
+    y_index = y.index if isinstance(y, pd.Series) else None
+    
+    # Convert to numpy array for processing
+    if isinstance(y, pd.Series):
+        y_values = y.values
+    else:
+        y_values = y
+    
+    # Binarize: <= threshold -> 0, > threshold -> 1
+    y_binary = (y_values > threshold).astype(int)
+    
+    # Restore original format
+    if y_index is not None:
+        y_binary = pd.Series(y_binary, index=y_index, name=y.name if hasattr(y, 'name') else None)
+    
+    return y_binary
+
+
+def cross_validate_classification(X, y_binary, model=None, cv=5, scoring='roc_auc', random_state=42):
+    """
+    Apply cross-validation to predict a binary variable y_binary using features X.
+    
+    Parameters:
+    -----------
+    X : pandas.DataFrame or numpy.ndarray
+        Input features (samples x features)
+    y_binary : pandas.Series or numpy.ndarray
+        Binary target variable (0 or 1)
+    model : sklearn estimator, optional
+        Classification model to use. If None, defaults to LogisticRegression
+    cv : int or cross-validation generator, default=5
+        Number of folds for cross-validation
+    scoring : str or callable, default='roc_auc'
+        Scoring metric to use. Common options:
+        - 'roc_auc' (default)
+        - 'accuracy'
+        - 'f1'
+        - 'precision'
+        - 'recall'
+    random_state : int, default=42
+        Random state for reproducibility
+    
+    Returns:
+    --------
+    results : dict
+        Dictionary containing:
+        - 'scores': array of cross-validation scores
+        - 'mean_score': mean of cross-validation scores
+        - 'std_score': standard deviation of cross-validation scores
+        - 'predictions': array of predictions on test data (same dimensions as y_binary)
+        - 'confusion_matrix': confusion matrix (2x2 array for binary classification)
+        - 'model': the fitted model (fitted on full data)
+        - 'cv': the cross-validation generator used
+    """
+    # Store original index if y_binary is a pandas Series
+    y_index = y_binary.index if isinstance(y_binary, pd.Series) else None
+    
+    # Convert to numpy arrays if pandas objects
+    if isinstance(X, pd.DataFrame):
+        X_values = X.values
+    else:
+        X_values = X
+    
+    if isinstance(y_binary, pd.Series):
+        y_values = y_binary.values
+    else:
+        y_values = y_binary
+    
+    # Default to LogisticRegression if no model provided
+    if model is None:
+        model = LogisticRegression(random_state=random_state, max_iter=1000)
+    
+    # Create cross-validation generator
+    if isinstance(cv, int):
+        cv_generator = KFold(n_splits=cv, shuffle=True, random_state=random_state)
+    else:
+        cv_generator = cv
+    
+    # Perform cross-validation to get scores
+    cv_scores = cross_val_score(model, X_values, y_values, cv=cv_generator, scoring=scoring, n_jobs=-1)
+    
+    # Get predictions on test data for each fold
+    y_pred = cross_val_predict(model, X_values, y_values, cv=cv_generator, n_jobs=-1)
+    
+    # Calculate confusion matrix
+    cm = confusion_matrix(y_values, y_pred)
+    
+    # Restore original index if y_binary was a pandas Series
+    if y_index is not None:
+        y_pred = pd.Series(y_pred, index=y_index)
+    
+    # Fit model on full data for reference
+    model.fit(X_values, y_values)
+    
+    # Prepare results
+    results = {
+        'scores': cv_scores,
+        'mean_score': np.mean(cv_scores),
+        'std_score': np.std(cv_scores),
+        'predictions': y_pred,
+        'confusion_matrix': cm,
         'model': model,
         'cv': cv_generator
     }
