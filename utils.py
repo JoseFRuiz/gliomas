@@ -1,15 +1,15 @@
 import pandas as pd
 import os
 import numpy as np
-from sklearn.model_selection import cross_val_score, cross_val_predict, KFold
+from sklearn.model_selection import cross_val_score, cross_val_predict, KFold, StratifiedKFold
 from sklearn.linear_model import Ridge, LogisticRegression
 from sklearn.metrics import make_scorer, mean_squared_error, mean_absolute_error, r2_score, confusion_matrix
 from sklearn.feature_selection import SelectKBest, f_classif, mutual_info_classif
 from sklearn.pipeline import Pipeline
 
 
-def load_data(clinical_path='data/ClinicaGliomasDic2025.csv', 
-              gene_tpm_path='data/gene_tpm__GeneSymbol_reclasificado_TCGA_filtrado.csv'):
+def load_data(clinical_path='data/ClinicaGliomasDic26_2025.csv', 
+              gene_tpm_path='data/GBM.mirna_Batch_adjusted_filter.csv'):
     """
     Load clinical and gene expression data and prepare input/output variables.
     
@@ -61,7 +61,7 @@ def load_data(clinical_path='data/ClinicaGliomasDic2025.csv',
     return X, y
 
 
-def cross_validate_regression(X, y, model=None, cv=5, scoring='r2', random_state=42):
+def cross_validate_regression(X, y, model=None, model_name=None, cv=5, scoring='r2', random_state=42):
     """
     Apply cross-validation to predict a continuous variable y using features X.
     
@@ -73,6 +73,8 @@ def cross_validate_regression(X, y, model=None, cv=5, scoring='r2', random_state
         Output variable (continuous target)
     model : sklearn estimator, optional
         Regression model to use. If None, defaults to Ridge regression
+    model_name : str, optional
+        Name of the model to use for the results
     cv : int or cross-validation generator, default=5
         Number of folds for cross-validation
     scoring : str or callable, default='r2'
@@ -93,6 +95,7 @@ def cross_validate_regression(X, y, model=None, cv=5, scoring='r2', random_state
         - 'std_score': standard deviation of cross-validation scores
         - 'predictions': array of predictions on test data (same dimensions as y)
         - 'model': the fitted model (fitted on full data)
+        - 'model_name': name of the model used
         - 'cv': the cross-validation generator used
     """
     # Store original index if y is a pandas Series
@@ -139,6 +142,7 @@ def cross_validate_regression(X, y, model=None, cv=5, scoring='r2', random_state
         'std_score': np.std(cv_scores),
         'predictions': y_pred,
         'model': model,
+        'model_name': model_name,
         'cv': cv_generator
     }
     
@@ -182,7 +186,7 @@ def binarize_y(y, threshold=365):
     return y_binary
 
 
-def cross_validate_classification(X, y_binary, model=None, cv=5, scoring='roc_auc', random_state=42):
+def cross_validate_classification(X, y_binary, model=None, model_name=None, cv=5, scoring='roc_auc', random_state=42):
     """
     Apply cross-validation to predict a binary variable y_binary using features X.
     
@@ -194,6 +198,8 @@ def cross_validate_classification(X, y_binary, model=None, cv=5, scoring='roc_au
         Binary target variable (0 or 1)
     model : sklearn estimator, optional
         Classification model to use. If None, defaults to LogisticRegression
+    model_name : str, optional
+        Name of the model to use for the results
     cv : int or cross-validation generator, default=5
         Number of folds for cross-validation
     scoring : str or callable, default='roc_auc'
@@ -216,6 +222,7 @@ def cross_validate_classification(X, y_binary, model=None, cv=5, scoring='roc_au
         - 'predictions': array of predictions on test data (same dimensions as y_binary)
         - 'confusion_matrix': confusion matrix (2x2 array for binary classification)
         - 'model': the fitted model (fitted on full data)
+        - 'model_name': name of the model used
         - 'cv': the cross-validation generator used
     """
     # Store original index if y_binary is a pandas Series
@@ -236,9 +243,9 @@ def cross_validate_classification(X, y_binary, model=None, cv=5, scoring='roc_au
     if model is None:
         model = LogisticRegression(random_state=random_state, max_iter=1000)
     
-    # Create cross-validation generator
+    # Create cross-validation generator - use StratifiedKFold for classification
     if isinstance(cv, int):
-        cv_generator = KFold(n_splits=cv, shuffle=True, random_state=random_state)
+        cv_generator = StratifiedKFold(n_splits=cv, shuffle=True, random_state=random_state)
     else:
         cv_generator = cv
     
@@ -266,13 +273,14 @@ def cross_validate_classification(X, y_binary, model=None, cv=5, scoring='roc_au
         'predictions': y_pred,
         'confusion_matrix': cm,
         'model': model,
+        'model_name': model_name,
         'cv': cv_generator
     }
     
     return results
 
 
-def cross_validate_classification_with_feature_selection(X, y_binary, model=None, cv=5, 
+def cross_validate_classification_with_feature_selection(X, y_binary, model=None, model_name=None, cv=5, 
                                                           scoring='roc_auc', random_state=42,
                                                           n_features=1000, selection_method='f_classif'):
     """
@@ -287,6 +295,8 @@ def cross_validate_classification_with_feature_selection(X, y_binary, model=None
         Binary target variable (0 or 1)
     model : sklearn estimator, optional
         Classification model to use. If None, defaults to LogisticRegression
+    model_name : str, optional
+        Name of the model to use for the results
     cv : int or cross-validation generator, default=5
         Number of folds for cross-validation
     scoring : str or callable, default='roc_auc'
@@ -317,6 +327,7 @@ def cross_validate_classification_with_feature_selection(X, y_binary, model=None
         - 'selected_features': list of feature names/indices selected (from final fit)
         - 'n_features': number of features selected
         - 'model': the fitted pipeline (fitted on full data)
+        - 'model_name': name of the model used
         - 'cv': the cross-validation generator used
     """
     # Store original index and column names if y_binary and X are pandas objects
@@ -352,9 +363,9 @@ def cross_validate_classification_with_feature_selection(X, y_binary, model=None
         ('classifier', model)
     ])
     
-    # Create cross-validation generator
+    # Create cross-validation generator - use StratifiedKFold for classification
     if isinstance(cv, int):
-        cv_generator = KFold(n_splits=cv, shuffle=True, random_state=random_state)
+        cv_generator = StratifiedKFold(n_splits=cv, shuffle=True, random_state=random_state)
     else:
         cv_generator = cv
     
@@ -391,6 +402,7 @@ def cross_validate_classification_with_feature_selection(X, y_binary, model=None
         'selected_features': selected_features,
         'n_features': n_features,
         'model': pipeline,
+        'model_name': model_name,
         'cv': cv_generator
     }
     
