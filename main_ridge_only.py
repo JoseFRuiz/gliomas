@@ -21,6 +21,7 @@ n_samples = X.shape[0]
 max_outliers = int(n_samples * 0.5)
 n_features = 100  # Number of features to select
 ridge_alpha = 10.0  # Regularization strength
+band_percentile = 80  # Percentile threshold for prediction band filtering (keep samples within this percentile of error)
 
 print("="*60)
 print("RIDGE CLASSIFIER PERFORMANCE EVALUATION")
@@ -29,6 +30,7 @@ print(f"Total samples: {n_samples}")
 print(f"Max outliers to remove: {max_outliers}")
 print(f"Number of features to select: {n_features}")
 print(f"Ridge alpha (regularization): {ridge_alpha}")
+print(f"Band filtering percentile: {band_percentile}%")
 print("="*60)
 
 # Step 1: Filter samples and select features for Ridge
@@ -64,6 +66,13 @@ print(f"  Correlation: {results_ridge_full['correlation']:.4f}")
 print("\n--- Step 4: Generating cross-validation predictions ---")
 X_full_ridge_values = X_full_ridge.values if isinstance(X_full_ridge, pd.DataFrame) else X_full_ridge
 y_values = y.values if isinstance(y, pd.Series) else y
+
+# Initialize variables for band filtering
+X_band_filtered = None
+y_band_filtered = None
+results_ridge_band = None
+kept_indices_band = None
+removed_indices_band = None
 
 if len(y_values) >= 10:
     n_splits = min(5, max(3, len(y_values) // 3))
@@ -104,6 +113,130 @@ if len(y_values) >= 10:
     plt.tight_layout()
     plt.savefig('ridge_performance.png', dpi=300, bbox_inches='tight')
     print("  Saved plot to: ridge_performance.png")
+    plt.show()
+    
+    # Step 5b: Filter samples based on distance from perfect prediction line
+    print("\n--- Step 5b: Filtering samples within prediction band ---")
+    
+    # Calculate perpendicular distance from each point to the line y = x
+    # Distance = |predicted - actual| / sqrt(2) for line y = x
+    # We'll use absolute error as a simpler metric
+    abs_errors = np.abs(y_pred_vals - y_values)
+    
+    # Define threshold: keep samples within a certain percentile or standard deviation
+    # Option 1: Use percentile (e.g., keep 80% of samples closest to the line)
+    error_threshold_percentile = np.percentile(abs_errors, band_percentile)
+    
+    # Option 2: Use standard deviation (e.g., keep samples within 2 std dev)
+    error_threshold_std = np.mean(abs_errors) + 2 * np.std(abs_errors)
+    
+    # Use the more restrictive threshold (keeps more samples)
+    error_threshold = min(error_threshold_percentile, error_threshold_std)
+    
+    # Create mask for samples within the band
+    # The band is defined by two parallel lines: y = x ± threshold
+    # A point (a, p) is within the band if |p - a| <= threshold
+    within_band_mask = abs_errors <= error_threshold
+    
+    # Get indices of kept and removed samples
+    if isinstance(y, pd.Series):
+        kept_indices_band = y.index[within_band_mask]
+        removed_indices_band = y.index[~within_band_mask]
+    else:
+        kept_indices_band = np.where(within_band_mask)[0]
+        removed_indices_band = np.where(~within_band_mask)[0]
+    
+    # Filter data
+    if isinstance(X_full_ridge, pd.DataFrame):
+        X_band_filtered = X_full_ridge.loc[kept_indices_band]
+    else:
+        X_band_filtered = X_full_ridge_values[kept_indices_band]
+    
+    if isinstance(y, pd.Series):
+        y_band_filtered = y.loc[kept_indices_band]
+        y_band_values = y_band_filtered.values
+    else:
+        y_band_filtered = y[kept_indices_band]
+        y_band_values = y_band_filtered
+    
+    y_pred_band_filtered = y_pred_vals[within_band_mask]
+    
+    # Calculate metrics on filtered subset
+    r2_band = r2_score(y_band_values, y_pred_band_filtered)
+    corr_band = pearsonr(y_band_values, y_pred_band_filtered)[0] if len(y_band_values) > 1 else 0
+    
+    print(f"  Error threshold: {error_threshold:.2f} days")
+    print(f"  Samples kept: {len(kept_indices_band)} ({100*len(kept_indices_band)/len(y_values):.1f}%)")
+    print(f"  Samples removed: {len(removed_indices_band)} ({100*len(removed_indices_band)/len(y_values):.1f}%)")
+    print(f"  R² (filtered): {r2_band:.4f} (original: {r2_ridge:.4f})")
+    print(f"  Correlation (filtered): {corr_band:.4f} (original: {corr_ridge:.4f})")
+    
+    # Re-evaluate model on filtered subset with cross-validation
+    print("\n  Re-evaluating Ridge on band-filtered subset with cross-validation...")
+    results_ridge_band = cross_validate_regression(X_band_filtered, y_band_filtered, 
+                                                    model=ridge_model, model_name='Ridge (Band-Filtered)')
+    print(f"  R² (CV): {results_ridge_band['mean_score']:.4f} ± {results_ridge_band['std_score']:.4f}")
+    print(f"  Correlation (CV): {results_ridge_band['correlation']:.4f}")
+    
+    # Get NEW cross-validation predictions from filtered dataset
+    y_pred_band_cv = results_ridge_band['predictions']
+    if isinstance(y_pred_band_cv, pd.Series):
+        y_pred_band_cv_values = y_pred_band_cv.values
+    else:
+        y_pred_band_cv_values = y_pred_band_cv
+    
+    # Calculate metrics on NEW CV predictions
+    r2_band_cv = r2_score(y_band_values, y_pred_band_cv_values)
+    corr_band_cv = pearsonr(y_band_values, y_pred_band_cv_values)[0] if len(y_band_values) > 1 else 0
+    
+    print(f"  R² (from CV predictions): {r2_band_cv:.4f}")
+    print(f"  Correlation (from CV predictions): {corr_band_cv:.4f}")
+    
+    # Visualize filtered results with parallel lines
+    print("\n  Creating visualization with prediction band...")
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(20, 8))
+    
+    # Left plot: Original with band lines
+    ax1.scatter(y_values, y_pred_vals, alpha=0.6, s=60, color='blue', edgecolors='black', linewidth=0.5, label='All samples')
+    ax1.scatter(y_values[~within_band_mask], y_pred_vals[~within_band_mask], 
+                alpha=0.8, s=80, color='red', edgecolors='black', linewidth=0.5, label='Removed samples')
+    
+    # Perfect prediction line
+    ax1.plot([y_values.min(), y_values.max()], 
+            [y_values.min(), y_values.max()], 
+            'r--', lw=2, label='Perfect prediction (y=x)')
+    
+    # Parallel lines defining the band
+    x_range = np.array([y_values.min(), y_values.max()])
+    ax1.plot(x_range, x_range + error_threshold, 
+            'g--', lw=2, alpha=0.7, label=f'Upper band (y=x+{error_threshold:.1f})')
+    ax1.plot(x_range, x_range - error_threshold, 
+            'g--', lw=2, alpha=0.7, label=f'Lower band (y=x-{error_threshold:.1f})')
+    
+    ax1.set_xlabel('Actual Values (Survival Days)', fontsize=12, fontweight='bold')
+    ax1.set_ylabel('Predicted Values (Survival Days)', fontsize=12, fontweight='bold')
+    ax1.set_title(f'Original Predictions with Filtering Band\n(R² = {r2_ridge:.4f}, Corr = {corr_ridge:.4f})', 
+                 fontsize=13, fontweight='bold', pad=15)
+    ax1.legend(fontsize=10, loc='best')
+    ax1.grid(True, alpha=0.3)
+    
+    # Right plot: NEW cross-validation predictions on filtered dataset
+    ax2.scatter(y_band_values, y_pred_band_cv_values, alpha=0.6, s=60, color='green', 
+               edgecolors='black', linewidth=0.5, label='Filtered samples (new CV)')
+    ax2.plot([y_band_values.min(), y_band_values.max()], 
+            [y_band_values.min(), y_band_values.max()], 
+            'r--', lw=2, label='Perfect prediction')
+    
+    ax2.set_xlabel('Actual Values (Survival Days)', fontsize=12, fontweight='bold')
+    ax2.set_ylabel('Predicted Values (Survival Days)', fontsize=12, fontweight='bold')
+    ax2.set_title(f'New CV Predictions on Filtered Dataset\n(R² = {r2_band_cv:.4f}, Corr = {corr_band_cv:.4f})', 
+                 fontsize=13, fontweight='bold', pad=15)
+    ax2.legend(fontsize=10)
+    ax2.grid(True, alpha=0.3)
+    
+    plt.tight_layout()
+    plt.savefig('ridge_band_filtered_performance.png', dpi=300, bbox_inches='tight')
+    print("  Saved band-filtered plot to: ridge_band_filtered_performance.png")
     plt.show()
     
 else:
@@ -255,6 +388,12 @@ if y_pred_ridge is not None:
     print(f"\nCross-Validation Predictions (Full Dataset):")
     print(f"  R²: {r2_ridge:.4f}")
     print(f"  Correlation: {corr_ridge:.4f}")
+    
+    if results_ridge_band is not None:
+        print(f"\nBand-Filtered Dataset ({len(kept_indices_band)} samples, removed {len(removed_indices_band)}):")
+        print(f"  R² (CV): {results_ridge_band['mean_score']:.4f} ± {results_ridge_band['std_score']:.4f}")
+        print(f"  Correlation (CV): {results_ridge_band['correlation']:.4f}")
+        print(f"  Improvement in correlation: {results_ridge_band['correlation'] - corr_ridge:+.4f}")
 
 print(f"\nSelected Features: {len(selected_features_ridge)}")
 print(f"Ridge Alpha (Regularization): {ridge_alpha}")
