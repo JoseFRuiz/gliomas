@@ -3,9 +3,11 @@
 
 from utils import load_data, cross_validate_regression, filter_samples_for_model_with_features
 import numpy as np
-from sklearn.linear_model import Ridge
-from sklearn.model_selection import KFold, cross_val_predict
-from sklearn.metrics import r2_score
+from sklearn.linear_model import Ridge, LogisticRegression
+from sklearn.model_selection import KFold, cross_val_predict, StratifiedKFold, cross_val_score
+from sklearn.metrics import r2_score, accuracy_score, roc_auc_score
+from sklearn.preprocessing import StandardScaler
+from sklearn.pipeline import Pipeline
 from scipy.stats import pearsonr
 import pandas as pd
 import os
@@ -19,8 +21,8 @@ X, y = load_data(gene_tpm_path=gene_tpm_path)
 # Set up parameters
 n_samples = X.shape[0]
 max_outliers = int(n_samples * 0.5)
-n_features = 100  # Number of features to select
-ridge_alpha = 10.0  # Regularization strength
+n_features = 1000  # Number of features to select
+ridge_alpha = 100.0  # Regularization strength
 band_percentile = 80  # Percentile threshold for prediction band filtering (keep samples within this percentile of error)
 
 print("="*60)
@@ -237,8 +239,99 @@ if len(y_values) >= 10:
     plt.tight_layout()
     plt.savefig('ridge_band_filtered_performance.png', dpi=300, bbox_inches='tight')
     print("  Saved band-filtered plot to: ridge_band_filtered_performance.png")
-    plt.show()
-    
+
+    # Ensure output dir exists for sample lists and classifier outputs
+    output_dir_step5 = 'output'
+    os.makedirs(output_dir_step5, exist_ok=True)
+
+    # Save Band sample lists (selected vs filtered out)
+    band_kept_ids = np.atleast_1d(kept_indices_band).tolist()
+    band_removed_ids = np.atleast_1d(removed_indices_band).tolist()
+    pd.DataFrame({'Sample_ID': band_kept_ids}).to_csv(os.path.join(output_dir_step5, 'band_kept_samples.csv'), index=False)
+    pd.DataFrame({'Sample_ID': band_removed_ids}).to_csv(os.path.join(output_dir_step5, 'band_removed_samples.csv'), index=False)
+    print(f"  Saved Band sample lists: {len(band_kept_ids)} kept, {len(band_removed_ids)} removed")
+
+    # --- Kept vs removed classifier (can we tell them apart from input features?) ---
+    print("\n--- Step 5c: Classifier (kept vs removed) with cross-validation ---")
+    # Binary labels: 1 = band kept, 0 = band removed
+    y_binary = pd.Series(1, index=kept_indices_band).reindex(y.index, fill_value=0).fillna(0).astype(int)
+    y_binary_values = y_binary.values
+    X_clf = X_full_ridge_values  # use selected features only
+    feature_names_clf = selected_features_ridge
+
+    pipe_clf = Pipeline([
+        ('scaler', StandardScaler()),
+        ('clf', LogisticRegression(max_iter=2000, random_state=42, class_weight='balanced'))
+    ])
+    n_class0 = (y_binary_values == 0).sum()
+    n_class1 = (y_binary_values == 1).sum()
+    n_splits_actual = min(5, n_class0, n_class1) if n_class0 and n_class1 else 0
+    if n_splits_actual >= 2:
+        cv_clf = StratifiedKFold(n_splits=n_splits_actual, shuffle=True, random_state=42)
+        acc_scores = cross_val_score(pipe_clf, X_clf, y_binary_values, cv=cv_clf, scoring='accuracy', n_jobs=-1)
+        print(f"  Accuracy (CV): {acc_scores.mean():.4f} ± {acc_scores.std():.4f}")
+        try:
+            auc_scores = cross_val_score(pipe_clf, X_clf, y_binary_values, cv=cv_clf, scoring='roc_auc', n_jobs=-1)
+            print(f"  ROC-AUC (CV): {auc_scores.mean():.4f} ± {auc_scores.std():.4f}")
+        except Exception:
+            print("  ROC-AUC: not computed (e.g. one class in a fold)")
+    else:
+        print("  Skipping CV (need at least 2 samples per class for stratified folds).")
+
+    # Feature weights: (1) classifier on full dataset, (2) classifier on ridge-filtered dataset
+    # (1) Full dataset
+    pipe_full = Pipeline([
+        ('scaler', StandardScaler()),
+        ('clf', LogisticRegression(max_iter=2000, random_state=42, class_weight='balanced'))
+    ])
+    pipe_full.fit(X_clf, y_binary_values)
+    coef_full = pipe_full.named_steps['clf'].coef_.ravel()
+    weights_full_df = pd.DataFrame({
+        'Feature': feature_names_clf,
+        'Coefficient_full_dataset': coef_full,
+        'Abs_Coefficient_full_dataset': np.abs(coef_full)
+    }).sort_values('Abs_Coefficient_full_dataset', ascending=False)
+
+    # (2) Ridge-filtered dataset (only ridge-kept samples, same binary labels)
+    ridge_kept_pos = np.array(sorted(kept_samples_ridge))
+    X_ridge_for_clf = X_clf[ridge_kept_pos]
+    y_binary_ridge = y_binary_values[ridge_kept_pos]
+    n_class0_r = (y_binary_ridge == 0).sum()
+    n_class1_r = (y_binary_ridge == 1).sum()
+    if n_class0_r >= 1 and n_class1_r >= 1:
+        pipe_filtered = Pipeline([
+            ('scaler', StandardScaler()),
+            ('clf', LogisticRegression(max_iter=2000, random_state=42, class_weight='balanced'))
+        ])
+        pipe_filtered.fit(X_ridge_for_clf, y_binary_ridge)
+        coef_filtered = pipe_filtered.named_steps['clf'].coef_.ravel()
+        weights_filtered_df = pd.DataFrame({
+            'Feature': feature_names_clf,
+            'Coefficient_filtered_dataset': coef_filtered,
+            'Abs_Coefficient_filtered_dataset': np.abs(coef_filtered)
+        }).sort_values('Abs_Coefficient_filtered_dataset', ascending=False)
+    else:
+        weights_filtered_df = pd.DataFrame({
+            'Feature': feature_names_clf,
+            'Coefficient_filtered_dataset': np.nan,
+            'Abs_Coefficient_filtered_dataset': np.nan
+        })
+
+    # Merge and save feature weights for classification (full + filtered)
+    if 'Coefficient_filtered_dataset' in weights_filtered_df.columns and weights_filtered_df['Coefficient_filtered_dataset'].notna().any():
+        classification_weights_df = weights_full_df.merge(
+            weights_filtered_df[['Feature', 'Coefficient_filtered_dataset', 'Abs_Coefficient_filtered_dataset']],
+            on='Feature', how='outer'
+        )
+    else:
+        classification_weights_df = weights_full_df.copy()
+        classification_weights_df['Coefficient_filtered_dataset'] = np.nan
+        classification_weights_df['Abs_Coefficient_filtered_dataset'] = np.nan
+    classification_weights_df = classification_weights_df.sort_values('Abs_Coefficient_full_dataset', ascending=False)
+    classification_weights_file = os.path.join(output_dir_step5, 'classifier_kept_vs_removed_feature_weights.csv')
+    classification_weights_df.to_csv(classification_weights_file, index=False)
+    print(f"  Saved classification feature weights (full + filtered) to: {classification_weights_file}")
+
 else:
     print("  WARNING: Insufficient samples for cross-validation predictions")
     y_pred_ridge = None
@@ -249,6 +342,14 @@ print("\n--- Step 6: Feature Relevance Analysis ---")
 # Ensure output directory exists
 output_dir = 'output'
 os.makedirs(output_dir, exist_ok=True)
+
+# Save sample lists: Ridge filtering (kept vs removed)
+sample_index = y.index if isinstance(y, pd.Series) else np.arange(len(y))
+ridge_kept_ids = [sample_index[i] for i in kept_samples_ridge]
+ridge_removed_ids = [sample_index[i] for i in removed_ridge]
+pd.DataFrame({'Sample_ID': ridge_kept_ids}).to_csv(os.path.join(output_dir, 'ridge_kept_samples.csv'), index=False)
+pd.DataFrame({'Sample_ID': ridge_removed_ids}).to_csv(os.path.join(output_dir, 'ridge_removed_samples.csv'), index=False)
+print(f"  Saved Ridge sample lists: {len(ridge_kept_ids)} kept, {len(ridge_removed_ids)} removed")
 
 # Train final model on full dataset to get coefficients
 ridge_final = Ridge(alpha=ridge_alpha)
