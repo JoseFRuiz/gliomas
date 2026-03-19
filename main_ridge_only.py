@@ -13,10 +13,18 @@ import pandas as pd
 import os
 import matplotlib.pyplot as plt
 
-# Load data
+# Load data and options
 gene_tpm_path = os.path.join('data', 'TCGAGliomas_RNAm_Filtrado_QC_verif.csv')
+log_transform_survival = True  # If True, model and metrics use y = log(1 + survival_days)
 
 X, y = load_data(gene_tpm_path=gene_tpm_path)
+
+# Optional: log-transform survival days (log(1 + x)) for modeling
+if log_transform_survival:
+    if isinstance(y, pd.Series):
+        y = pd.Series(np.log1p(y.values), index=y.index, name=y.name)
+    else:
+        y = np.log1p(y)
 
 # Set up parameters
 n_samples = X.shape[0]
@@ -33,6 +41,10 @@ print(f"Max outliers to remove: {max_outliers}")
 print(f"Number of features to select: {n_features}")
 print(f"Ridge alpha (regularization): {ridge_alpha}")
 print(f"Band filtering percentile: {band_percentile}%")
+print(f"Log-transform survival: {log_transform_survival}")
+if log_transform_survival:
+    y_vals = y.values if isinstance(y, pd.Series) else y
+    print(f"  (target = log(1+days); range [{y_vals.min():.2f}, {y_vals.max():.2f}])")
 print("="*60)
 
 # Step 1: Filter samples and select features for Ridge
@@ -69,6 +81,9 @@ print("\n--- Step 4: Generating cross-validation predictions ---")
 X_full_ridge_values = X_full_ridge.values if isinstance(X_full_ridge, pd.DataFrame) else X_full_ridge
 y_values = y.values if isinstance(y, pd.Series) else y
 
+# Axis label for survival (depends on transform)
+survival_label = 'log(1 + Survival Days)' if log_transform_survival else 'Survival Days'
+
 # Initialize variables for band filtering
 X_band_filtered = None
 y_band_filtered = None
@@ -94,24 +109,43 @@ if len(y_values) >= 10:
     print(f"  R²: {r2_ridge:.4f}")
     print(f"  Correlation: {corr_ridge:.4f}")
     
-    # Step 5: Visualize predictions
+    # Step 5: Visualize predictions (log scale and, if transformed, original scale)
     print("\n--- Step 5: Creating visualization ---")
-    fig, ax = plt.subplots(1, 1, figsize=(10, 8))
-    
     y_pred_vals = y_pred_ridge.values if isinstance(y_pred_ridge, pd.Series) else y_pred_ridge
-    
-    ax.scatter(y_values, y_pred_vals, alpha=0.6, s=60, color='blue', edgecolors='black', linewidth=0.5)
-    ax.plot([y_values.min(), y_values.max()], 
-            [y_values.min(), y_values.max()], 
-            'r--', lw=2, label='Perfect prediction')
-    
-    ax.set_xlabel('Actual Values (Survival Days)', fontsize=12, fontweight='bold')
-    ax.set_ylabel('Predicted Values (Survival Days)', fontsize=12, fontweight='bold')
-    ax.set_title(f'Ridge Classifier Performance\n(R² = {r2_ridge:.4f}, Correlation = {corr_ridge:.4f})', 
-                 fontsize=14, fontweight='bold', pad=15)
-    ax.legend(fontsize=11)
-    ax.grid(True, alpha=0.3)
-    
+
+    if log_transform_survival:
+        fig, (ax_log, ax_orig) = plt.subplots(1, 2, figsize=(16, 8))
+        # Left: log scale (model space)
+        ax_log.scatter(y_values, y_pred_vals, alpha=0.6, s=60, color='blue', edgecolors='black', linewidth=0.5)
+        ax_log.plot([y_values.min(), y_values.max()],
+                    [y_values.min(), y_values.max()], 'r--', lw=2, label='Perfect prediction')
+        ax_log.set_xlabel(f'Actual ({survival_label})', fontsize=12, fontweight='bold')
+        ax_log.set_ylabel(f'Predicted ({survival_label})', fontsize=12, fontweight='bold')
+        ax_log.set_title(f'Log scale (model space)\nR² = {r2_ridge:.4f}, Corr = {corr_ridge:.4f}', fontsize=13, fontweight='bold', pad=10)
+        ax_log.legend(fontsize=11)
+        ax_log.grid(True, alpha=0.3)
+        # Right: original scale (back-transformed)
+        y_act_days = np.expm1(y_values)
+        y_pred_days = np.expm1(y_pred_vals)
+        ax_orig.scatter(y_act_days, y_pred_days, alpha=0.6, s=60, color='blue', edgecolors='black', linewidth=0.5)
+        ax_orig.plot([y_act_days.min(), y_act_days.max()],
+                     [y_act_days.min(), y_act_days.max()], 'r--', lw=2, label='Perfect prediction')
+        ax_orig.set_xlabel('Actual (Survival Days)', fontsize=12, fontweight='bold')
+        ax_orig.set_ylabel('Predicted (Survival Days)', fontsize=12, fontweight='bold')
+        ax_orig.set_title('Original scale (expm1 of log-scale predictions)\nR² and Corr are in log space', fontsize=13, fontweight='bold', pad=10)
+        ax_orig.legend(fontsize=11)
+        ax_orig.grid(True, alpha=0.3)
+    else:
+        fig, ax_log = plt.subplots(1, 1, figsize=(10, 8))
+        ax_log.scatter(y_values, y_pred_vals, alpha=0.6, s=60, color='blue', edgecolors='black', linewidth=0.5)
+        ax_log.plot([y_values.min(), y_values.max()],
+                    [y_values.min(), y_values.max()], 'r--', lw=2, label='Perfect prediction')
+        ax_log.set_xlabel(f'Actual Values ({survival_label})', fontsize=12, fontweight='bold')
+        ax_log.set_ylabel(f'Predicted Values ({survival_label})', fontsize=12, fontweight='bold')
+        ax_log.set_title(f'Ridge Classifier Performance\n(R² = {r2_ridge:.4f}, Correlation = {corr_ridge:.4f})', fontsize=14, fontweight='bold', pad=15)
+        ax_log.legend(fontsize=11)
+        ax_log.grid(True, alpha=0.3)
+
     plt.tight_layout()
     plt.savefig('ridge_performance.png', dpi=300, bbox_inches='tight')
     print("  Saved plot to: ridge_performance.png")
@@ -120,24 +154,20 @@ if len(y_values) >= 10:
     # Step 5b: Filter samples based on distance from perfect prediction line
     print("\n--- Step 5b: Filtering samples within prediction band ---")
     
-    # Calculate perpendicular distance from each point to the line y = x
-    # Distance = |predicted - actual| / sqrt(2) for line y = x
-    # We'll use absolute error as a simpler metric
-    abs_errors = np.abs(y_pred_vals - y_values)
+    # Band is always defined in original scale (survival days) for interpretability
+    if log_transform_survival:
+        y_act_days_band = np.expm1(y_values)
+        y_pred_days_band = np.expm1(y_pred_vals)
+        abs_errors = np.abs(y_pred_days_band - y_act_days_band)
+    else:
+        abs_errors = np.abs(y_pred_vals - y_values)
     
     # Define threshold: keep samples within a certain percentile or standard deviation
-    # Option 1: Use percentile (e.g., keep 80% of samples closest to the line)
     error_threshold_percentile = np.percentile(abs_errors, band_percentile)
-    
-    # Option 2: Use standard deviation (e.g., keep samples within 2 std dev)
     error_threshold_std = np.mean(abs_errors) + 2 * np.std(abs_errors)
-    
-    # Use the more restrictive threshold (keeps more samples)
     error_threshold = min(error_threshold_percentile, error_threshold_std)
     
-    # Create mask for samples within the band
-    # The band is defined by two parallel lines: y = x ± threshold
-    # A point (a, p) is within the band if |p - a| <= threshold
+    # Create mask for samples within the band (threshold is in days when log_transform_survival)
     within_band_mask = abs_errors <= error_threshold
     
     # Get indices of kept and removed samples
@@ -167,7 +197,7 @@ if len(y_values) >= 10:
     r2_band = r2_score(y_band_values, y_pred_band_filtered)
     corr_band = pearsonr(y_band_values, y_pred_band_filtered)[0] if len(y_band_values) > 1 else 0
     
-    print(f"  Error threshold: {error_threshold:.2f} days")
+    print(f"  Error threshold: {error_threshold:.2f} days (band defined on original scale)")
     print(f"  Samples kept: {len(kept_indices_band)} ({100*len(kept_indices_band)/len(y_values):.1f}%)")
     print(f"  Samples removed: {len(removed_indices_band)} ({100*len(removed_indices_band)/len(y_values):.1f}%)")
     print(f"  R² (filtered): {r2_band:.4f} (original: {r2_ridge:.4f})")
@@ -194,48 +224,68 @@ if len(y_values) >= 10:
     print(f"  R² (from CV predictions): {r2_band_cv:.4f}")
     print(f"  Correlation (from CV predictions): {corr_band_cv:.4f}")
     
-    # Visualize filtered results with parallel lines
+    # Visualize filtered results with parallel lines (log and, if transformed, original scale)
     print("\n  Creating visualization with prediction band...")
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(20, 8))
-    
-    # Left plot: Original with band lines
+    if log_transform_survival:
+        fig, ((ax1, ax2), (ax3, ax4)) = plt.subplots(2, 2, figsize=(20, 16))
+    else:
+        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(20, 8))
+        ax3, ax4 = None, None
+
+    # Left plot: Full predictions (log scale); band lines only when band is in log scale
     ax1.scatter(y_values, y_pred_vals, alpha=0.6, s=60, color='blue', edgecolors='black', linewidth=0.5, label='All samples')
-    ax1.scatter(y_values[~within_band_mask], y_pred_vals[~within_band_mask], 
+    ax1.scatter(y_values[~within_band_mask], y_pred_vals[~within_band_mask],
                 alpha=0.8, s=80, color='red', edgecolors='black', linewidth=0.5, label='Removed samples')
-    
-    # Perfect prediction line
-    ax1.plot([y_values.min(), y_values.max()], 
-            [y_values.min(), y_values.max()], 
-            'r--', lw=2, label='Perfect prediction (y=x)')
-    
-    # Parallel lines defining the band
-    x_range = np.array([y_values.min(), y_values.max()])
-    ax1.plot(x_range, x_range + error_threshold, 
-            'g--', lw=2, alpha=0.7, label=f'Upper band (y=x+{error_threshold:.1f})')
-    ax1.plot(x_range, x_range - error_threshold, 
-            'g--', lw=2, alpha=0.7, label=f'Lower band (y=x-{error_threshold:.1f})')
-    
-    ax1.set_xlabel('Actual Values (Survival Days)', fontsize=12, fontweight='bold')
-    ax1.set_ylabel('Predicted Values (Survival Days)', fontsize=12, fontweight='bold')
-    ax1.set_title(f'Original Predictions with Filtering Band\n(R² = {r2_ridge:.4f}, Corr = {corr_ridge:.4f})', 
-                 fontsize=13, fontweight='bold', pad=15)
+    ax1.plot([y_values.min(), y_values.max()], [y_values.min(), y_values.max()], 'r--', lw=2, label='Perfect prediction (y=x)')
+    if not log_transform_survival:
+        x_range = np.array([y_values.min(), y_values.max()])
+        ax1.plot(x_range, x_range + error_threshold, 'g--', lw=2, alpha=0.7, label=f'Upper band (y=x+{error_threshold:.1f})')
+        ax1.plot(x_range, x_range - error_threshold, 'g--', lw=2, alpha=0.7, label=f'Lower band (y=x-{error_threshold:.1f})')
+    else:
+        ax1.annotate('Band defined in original scale (see row below)', xy=(0.02, 0.98), xycoords='axes fraction', fontsize=9, va='top')
+    ax1.set_xlabel(f'Actual ({survival_label})', fontsize=12, fontweight='bold')
+    ax1.set_ylabel(f'Predicted ({survival_label})', fontsize=12, fontweight='bold')
+    ax1.set_title(f'Log scale: Predictions with Filtering Band\n(R² = {r2_ridge:.4f}, Corr = {corr_ridge:.4f})', fontsize=13, fontweight='bold', pad=15)
     ax1.legend(fontsize=10, loc='best')
     ax1.grid(True, alpha=0.3)
-    
-    # Right plot: NEW cross-validation predictions on filtered dataset
-    ax2.scatter(y_band_values, y_pred_band_cv_values, alpha=0.6, s=60, color='green', 
-               edgecolors='black', linewidth=0.5, label='Filtered samples (new CV)')
-    ax2.plot([y_band_values.min(), y_band_values.max()], 
-            [y_band_values.min(), y_band_values.max()], 
-            'r--', lw=2, label='Perfect prediction')
-    
-    ax2.set_xlabel('Actual Values (Survival Days)', fontsize=12, fontweight='bold')
-    ax2.set_ylabel('Predicted Values (Survival Days)', fontsize=12, fontweight='bold')
-    ax2.set_title(f'New CV Predictions on Filtered Dataset\n(R² = {r2_band_cv:.4f}, Corr = {corr_band_cv:.4f})', 
-                 fontsize=13, fontweight='bold', pad=15)
+
+    # Right plot: CV predictions on filtered dataset (log scale)
+    ax2.scatter(y_band_values, y_pred_band_cv_values, alpha=0.6, s=60, color='green',
+                edgecolors='black', linewidth=0.5, label='Filtered samples (new CV)')
+    ax2.plot([y_band_values.min(), y_band_values.max()], [y_band_values.min(), y_band_values.max()], 'r--', lw=2, label='Perfect prediction')
+    ax2.set_xlabel(f'Actual ({survival_label})', fontsize=12, fontweight='bold')
+    ax2.set_ylabel(f'Predicted ({survival_label})', fontsize=12, fontweight='bold')
+    ax2.set_title(f'Log scale: New CV on Filtered Dataset\n(R² = {r2_band_cv:.4f}, Corr = {corr_band_cv:.4f})', fontsize=13, fontweight='bold', pad=15)
     ax2.legend(fontsize=10)
     ax2.grid(True, alpha=0.3)
-    
+
+    if log_transform_survival:
+        # Row 2: same in original scale (back-transformed)
+        y_act_days = np.expm1(y_values)
+        y_pred_days = np.expm1(y_pred_vals)
+        y_band_act_days = np.expm1(y_band_values)
+        y_band_pred_days = np.expm1(y_pred_band_cv_values)
+        ax3.scatter(y_act_days, y_pred_days, alpha=0.6, s=60, color='blue', edgecolors='black', linewidth=0.5, label='All samples')
+        ax3.scatter(y_act_days[~within_band_mask], y_pred_days[~within_band_mask],
+                    alpha=0.8, s=80, color='red', edgecolors='black', linewidth=0.5, label='Removed samples')
+        ax3.plot([y_act_days.min(), y_act_days.max()], [y_act_days.min(), y_act_days.max()], 'r--', lw=2, label='Perfect prediction')
+        x_range_days = np.array([y_act_days.min(), y_act_days.max()])
+        ax3.plot(x_range_days, x_range_days + error_threshold, 'g--', lw=2, alpha=0.7, label=f'Upper band (y=x+{error_threshold:.0f} days)')
+        ax3.plot(x_range_days, x_range_days - error_threshold, 'g--', lw=2, alpha=0.7, label=f'Lower band (y=x-{error_threshold:.0f} days)')
+        ax3.set_xlabel('Actual (Survival Days)', fontsize=12, fontweight='bold')
+        ax3.set_ylabel('Predicted (Survival Days)', fontsize=12, fontweight='bold')
+        ax3.set_title('Original scale: Predictions with Band (back-transformed)', fontsize=13, fontweight='bold', pad=15)
+        ax3.legend(fontsize=10, loc='best')
+        ax3.grid(True, alpha=0.3)
+        ax4.scatter(y_band_act_days, y_band_pred_days, alpha=0.6, s=60, color='green',
+                    edgecolors='black', linewidth=0.5, label='Filtered samples (new CV)')
+        ax4.plot([y_band_act_days.min(), y_band_act_days.max()], [y_band_act_days.min(), y_band_act_days.max()], 'r--', lw=2, label='Perfect prediction')
+        ax4.set_xlabel('Actual (Survival Days)', fontsize=12, fontweight='bold')
+        ax4.set_ylabel('Predicted (Survival Days)', fontsize=12, fontweight='bold')
+        ax4.set_title('Original scale: New CV on Filtered Dataset (back-transformed)', fontsize=13, fontweight='bold', pad=15)
+        ax4.legend(fontsize=10)
+        ax4.grid(True, alpha=0.3)
+
     plt.tight_layout()
     plt.savefig('ridge_band_filtered_performance.png', dpi=300, bbox_inches='tight')
     print("  Saved band-filtered plot to: ridge_band_filtered_performance.png")
@@ -424,39 +474,6 @@ ax2.invert_yaxis()
 plt.tight_layout()
 plt.savefig('ridge_feature_importance.png', dpi=300, bbox_inches='tight')
 print("  Saved feature importance plot to: ridge_feature_importance.png")
-plt.show()
-
-# Figure 2: Scatter plot of Coefficient vs Correlation
-fig2, ax = plt.subplots(1, 1, figsize=(10, 8))
-
-scatter = ax.scatter(feature_importance_df['Correlation_with_Target'], 
-                     feature_importance_df['Coefficient'],
-                     c=feature_importance_df['Abs_Coefficient'],
-                     s=100, alpha=0.6, cmap='viridis', edgecolors='black', linewidth=0.5)
-
-ax.set_xlabel('Correlation with Target', fontsize=12, fontweight='bold')
-ax.set_ylabel('Ridge Coefficient', fontsize=12, fontweight='bold')
-ax.set_title('Feature Relevance: Coefficient vs Correlation with Target\n(Color = Absolute Coefficient)', 
-             fontsize=13, fontweight='bold', pad=15)
-ax.axhline(y=0, color='black', linestyle='--', linewidth=0.8)
-ax.axvline(x=0, color='black', linestyle='--', linewidth=0.8)
-ax.grid(True, alpha=0.3)
-
-# Add colorbar
-cbar = plt.colorbar(scatter, ax=ax)
-cbar.set_label('Absolute Coefficient', fontsize=11, fontweight='bold')
-
-# Annotate top 5 features
-top_5 = feature_importance_df.head(5)
-for idx, row in top_5.iterrows():
-    ax.annotate(row['Feature'], 
-                (row['Correlation_with_Target'], row['Coefficient']),
-                fontsize=8, alpha=0.8,
-                bbox=dict(boxstyle='round,pad=0.3', facecolor='yellow', alpha=0.5))
-
-plt.tight_layout()
-plt.savefig('ridge_coefficient_vs_correlation.png', dpi=300, bbox_inches='tight')
-print("  Saved coefficient vs correlation plot to: ridge_coefficient_vs_correlation.png")
 plt.show()
 
 # Save detailed feature importance to CSV
