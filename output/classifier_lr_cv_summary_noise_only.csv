@@ -1,0 +1,2 @@
+scenario,classifier,n_features_used_for_classifier_cv,n_splits,train_accuracy_mean,train_accuracy_std,test_accuracy_mean,test_accuracy_std,train_roc_auc_mean,train_roc_auc_std,test_roc_auc_mean,test_roc_auc_std
+noise_only,LogisticRegression,1000,5,1.0,0.0,0.6726315789473684,0.08096714562314834,1.0,0.0,0.78003663003663,0.09001677788513927

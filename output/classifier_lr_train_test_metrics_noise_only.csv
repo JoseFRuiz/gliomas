@@ -1,0 +1,6 @@
+scenario,classifier,fold,n_train,n_test,train_accuracy,test_accuracy,train_roc_auc,test_roc_auc
+noise_only,LogisticRegression,0,78,20,1.0,0.65,1.0,0.7802197802197802
+noise_only,LogisticRegression,1,78,20,1.0,0.75,1.0,0.8351648351648352
+noise_only,LogisticRegression,2,78,20,1.0,0.7,1.0,0.8571428571428572
+noise_only,LogisticRegression,3,79,19,1.0,0.7368421052631579,1.0,0.8205128205128205
+noise_only,LogisticRegression,4,79,19,1.0,0.5263157894736842,1.0,0.6071428571428572

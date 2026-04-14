@@ -1,0 +1,10 @@
+approach,accuracy_mean,accuracy_std,roc_auc_mean,roc_auc_std,notes
+meta_features (Ridge pred + |residual|),0.56,0.076766365,0.594888889,0.078632133,(2 features)
+"meta_ext (pred,|res|,res,res²,rel_res) + LogReg",0.559473684,0.085087538,0.586888889,0.104265568,(5 features)
+meta_features (2 feat) + RandomForest,0.520526316,0.049635793,0.458222222,0.049084709,(2 features)
+meta_ext (5 feat) + RandomForest,0.468421053,0.083234475,0.461666667,0.104185258,(5 features)
+meta_features (2 feat) + SVM-RBF,0.529473684,0.074272091,0.505555556,0.068522322,(2 features)
+meta_ext (5 feat) + SVM-RBF,0.528421053,0.114531443,0.492,0.143759745,(5 features)
+"L1_LogReg (C=0.1, all features)",0.450526316,0.082639959,0.434444444,0.074615062,non-zero coefs: 34
+SelectKBest(k=32) + LogReg,0.43,0.088752512,0.444666667,0.101981359,(32 features)
+RandomForest (all features),0.428421053,0.05897086,0.365,0.041034463,
