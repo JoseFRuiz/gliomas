@@ -1,12 +1,12 @@
 # =============================================================================
-# Cluster-Guided Ridge Regression Pipeline
+# Cluster-Guided Regression Pipeline
 # =============================================================================
 # Pipeline overview:
 #   1. Load & preprocess data  (log-transform survival, feature selection)
 #   2. Cluster samples with HDBSCAN on reduced gene expression space
-#   3. Evaluate per-cluster CV performance (Ridge R²)
+#   3. Evaluate per-cluster CV performance (R²) with the chosen regressor
 #   4. Greedily filter clusters to maximise:  R²  -  λ × fraction_removed
-#   5. Re-evaluate Ridge CV on the retained subset
+#   5. Re-evaluate CV on the retained subset
 #   6. Train & evaluate two classifiers (Logistic Regression + Random Forest)
 #      to separate retained vs. discarded samples
 #   7. Report feature importance / gene weights from both classifiers
@@ -25,8 +25,9 @@ from sklearn.cluster import HDBSCAN
 from sklearn.decomposition import PCA
 from sklearn.preprocessing import StandardScaler
 from sklearn.feature_selection import f_regression
-from sklearn.linear_model import Ridge, LogisticRegression
-from sklearn.ensemble import RandomForestClassifier
+from sklearn.linear_model import Ridge, Lasso, ElasticNet, LogisticRegression
+from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor
+from sklearn.svm import SVR
 from sklearn.base import clone
 from sklearn.model_selection import KFold, StratifiedKFold, cross_val_score, cross_val_predict
 from sklearn.metrics import r2_score, roc_auc_score, accuracy_score, confusion_matrix
@@ -44,11 +45,11 @@ LOG_TRANSFORM        = True          # log(1+x) on survival days
 
 # Feature selection
 N_FEATURES           = 1000          # top features by F-regression for the Ridge model
-N_PCA_COMPONENTS     = 30           # PCA dims fed to HDBSCAN (reduces noise)
+N_PCA_COMPONENTS     = 3            # PCA dims fed to HDBSCAN (reduces noise)
 
 # HDBSCAN
 HDBSCAN_MIN_CLUSTER  = 5            # min_cluster_size  (tune: larger → fewer, bigger clusters)
-HDBSCAN_MIN_SAMPLES  = 3            # min_samples       (tune: larger → more noise points)
+HDBSCAN_MIN_SAMPLES  = 1            # min_samples       (tune: larger → more noise points)
 
 # Cluster filtering
 LAMBDA_PENALTY       = 0.5          # λ in:  score = R²_cv  -  λ × fraction_removed
@@ -57,8 +58,12 @@ LAMBDA_PENALTY       = 0.5          # λ in:  score = R²_cv  -  λ × fraction_
 #   • λ=0.5 → balanced default
 MAX_FRACTION_REMOVE  = 0.50         # hard cap: never discard more than this fraction
 
-# Ridge
-RIDGE_ALPHA          = 100.0
+# Regression model
+# Options: 'ridge', 'lasso', 'elasticnet', 'svr', 'rf'
+REGRESSION_MODEL     = 'rf' # 'ridge'
+RIDGE_ALPHA          = 100.0   # alpha for ridge / lasso / elasticnet
+SVR_C                = 10.0    # C for svr
+RF_REG_ESTIMATORS    = 100     # n_estimators for rf
 
 # Cross-validation
 N_CV_FOLDS           = 5
@@ -76,6 +81,32 @@ RANDOM_STATE         = 42
 # ── HELPERS ───────────────────────────────────────────────────────────────────
 # =============================================================================
 
+def build_regression_model():
+    """Return a fresh sklearn estimator for the chosen REGRESSION_MODEL."""
+    if REGRESSION_MODEL == 'ridge':
+        return Ridge(alpha=RIDGE_ALPHA)
+    elif REGRESSION_MODEL == 'lasso':
+        return Pipeline([('scaler', StandardScaler()),
+                         ('reg', Lasso(alpha=RIDGE_ALPHA, max_iter=5000))])
+    elif REGRESSION_MODEL == 'elasticnet':
+        return Pipeline([('scaler', StandardScaler()),
+                         ('reg', ElasticNet(alpha=RIDGE_ALPHA, max_iter=5000))])
+    elif REGRESSION_MODEL == 'svr':
+        return Pipeline([('scaler', StandardScaler()),
+                         ('reg', SVR(kernel='rbf', C=SVR_C, gamma='scale'))])
+    elif REGRESSION_MODEL == 'rf':
+        return Pipeline([('scaler', StandardScaler()),
+                         ('reg', RandomForestRegressor(n_estimators=RF_REG_ESTIMATORS,
+                                                       random_state=RANDOM_STATE,
+                                                       n_jobs=-1))])
+    else:
+        raise ValueError(f"Unknown REGRESSION_MODEL: {REGRESSION_MODEL!r}. "
+                         "Choose from: 'ridge', 'lasso', 'elasticnet', 'svr', 'rf'")
+
+
+MODEL_LABEL = REGRESSION_MODEL.upper()
+
+
 def select_features(X, y, n_features):
     """Return top-n feature names by F-regression score."""
     X_vals = X.values if isinstance(X, pd.DataFrame) else X
@@ -87,8 +118,8 @@ def select_features(X, y, n_features):
     return top_idx.tolist()
 
 
-def cv_r2(X_arr, y_arr, alpha=RIDGE_ALPHA, n_splits=N_CV_FOLDS, rs=RANDOM_STATE):
-    """5-fold CV R² for Ridge.  Returns NaN if too few samples."""
+def cv_r2(X_arr, y_arr, n_splits=N_CV_FOLDS, rs=RANDOM_STATE):
+    """CV R² for the configured regression model.  Returns NaN if too few samples."""
     n = len(y_arr)
     if n < 2 * n_splits:
         return np.nan
@@ -98,7 +129,7 @@ def cv_r2(X_arr, y_arr, alpha=RIDGE_ALPHA, n_splits=N_CV_FOLDS, rs=RANDOM_STATE)
     for tr, va in cv.split(X_arr):
         if len(va) < 2:
             continue
-        mdl = Ridge(alpha=alpha)
+        mdl = clone(build_regression_model())
         mdl.fit(X_arr[tr], y_arr[tr])
         scores.append(r2_score(y_arr[va], mdl.predict(X_arr[va])))
     return float(np.mean(scores)) if scores else np.nan
@@ -126,7 +157,7 @@ def safe_auc(y_true, y_prob):
 # ── STEP 0 : Load & prepare data ──────────────────────────────────────────────
 # =============================================================================
 print("=" * 65)
-print("CLUSTER-GUIDED RIDGE PIPELINE")
+print(f"CLUSTER-GUIDED REGRESSION PIPELINE  [{MODEL_LABEL}]")
 print("=" * 65)
 
 X, y = load_data(gene_tpm_path=GENE_TPM_PATH)
@@ -164,7 +195,8 @@ X_pca = pca.fit_transform(X_scaled)
 print(f"    PCA variance explained: {pca.explained_variance_ratio_.sum()*100:.1f}%")
 
 hdb = HDBSCAN(min_cluster_size=HDBSCAN_MIN_CLUSTER,
-              min_samples=HDBSCAN_MIN_SAMPLES)
+              min_samples=HDBSCAN_MIN_SAMPLES,
+              cluster_selection_method='leaf')
 cluster_labels = hdb.fit_predict(X_pca)   # -1 = noise / unclustered
 
 unique_clusters = sorted(set(cluster_labels))
@@ -180,7 +212,7 @@ cluster_series = pd.Series(cluster_labels, index=X.index, name='cluster')
 # =============================================================================
 # ── STEP 3 : Per-cluster CV performance ───────────────────────────────────────
 # =============================================================================
-print(f"\n[3] Evaluating per-cluster Ridge CV R² …")
+print(f"\n[3] Evaluating per-cluster {MODEL_LABEL} CV R² …")
 
 X_arr = X_sel.values.astype(float)
 y_arr = y.values.astype(float)
@@ -253,7 +285,7 @@ if n_noise > 0:
         'penalised_score_without_cluster': float(score_noise_only),
     })
 
-f_loo = os.path.join(OUTPUT_DIR, 'cluster_leave_one_out_ridge_performance.csv')
+f_loo = os.path.join(OUTPUT_DIR, f'cluster_leave_one_out_{REGRESSION_MODEL}_performance.csv')
 pd.DataFrame(leave_one_out_rows).to_csv(f_loo, index=False)
 print(f"    Saved: {f_loo}")
 
@@ -350,12 +382,12 @@ X_ret  = X_sel.loc[retained_idx]
 y_ret  = y.loc[retained_idx]
 
 results_retained = cross_validate_regression(
-    X_ret, y_ret, model=Ridge(alpha=RIDGE_ALPHA),
-    model_name='Ridge (Retained)', cv=N_CV_FOLDS)
+    X_ret, y_ret, model=build_regression_model(),
+    model_name=f'{MODEL_LABEL} (Retained)', cv=N_CV_FOLDS)
 
 results_full = cross_validate_regression(
-    X_sel, y, model=Ridge(alpha=RIDGE_ALPHA),
-    model_name='Ridge (Full)', cv=N_CV_FOLDS)
+    X_sel, y, model=build_regression_model(),
+    model_name=f'{MODEL_LABEL} (Full)', cv=N_CV_FOLDS)
 
 print(f"    Full dataset     →  R²={results_full['mean_score']:.4f} ± "
       f"{results_full['std_score']:.4f}   corr={results_full['correlation']:.4f}")
@@ -827,7 +859,7 @@ if LOG_TRANSFORM:
         ax.plot([lo, hi], [lo, hi], 'r--', lw=1.8, label='y = x')
         ax.set_xlabel(f'Actual ({target_label})', fontsize=11)
         ax.set_ylabel(f'Predicted ({target_label})', fontsize=11)
-        ax.set_title(f'Log scale: Ridge CV — {title}\nR²={r2v:.4f}  Corr={corr:.4f}',
+        ax.set_title(f'Log scale: {MODEL_LABEL} CV — {title}\nR²={r2v:.4f}  Corr={corr:.4f}',
                      fontsize=12, fontweight='bold')
         ax.legend(fontsize=10)
         ax.grid(True, alpha=0.3)
@@ -850,7 +882,7 @@ if LOG_TRANSFORM:
         ax.plot([lo, hi], [lo, hi], 'r--', lw=1.8, label='y = x')
         ax.set_xlabel('Actual (Survival Days)', fontsize=11)
         ax.set_ylabel('Predicted (Survival Days)', fontsize=11)
-        ax.set_title(f'Original scale (expm1): Ridge CV — {title}\nR² & Corr computed in log space',
+        ax.set_title(f'Original scale (expm1): {MODEL_LABEL} CV — {title}\nR² & Corr computed in log space',
                      fontsize=12, fontweight='bold')
         ax.legend(fontsize=10)
         ax.grid(True, alpha=0.3)
@@ -870,13 +902,13 @@ else:
         ax.plot([lo, hi], [lo, hi], 'r--', lw=1.8, label='y = x')
         ax.set_xlabel(f'Actual ({target_label})', fontsize=11)
         ax.set_ylabel(f'Predicted ({target_label})', fontsize=11)
-        ax.set_title(f'Ridge CV — {title}\nR²={r2v:.4f}  Corr={corr:.4f}',
+        ax.set_title(f'{MODEL_LABEL} CV — {title}\nR²={r2v:.4f}  Corr={corr:.4f}',
                      fontsize=12, fontweight='bold')
         ax.legend(fontsize=10)
         ax.grid(True, alpha=0.3)
 
 plt.tight_layout()
-cv_plot = os.path.join(OUTPUT_DIR, 'ridge_cv_full_vs_retained.png')
+cv_plot = os.path.join(OUTPUT_DIR, f'{REGRESSION_MODEL}_cv_full_vs_retained.png')
 plt.savefig(cv_plot, dpi=200, bbox_inches='tight')
 plt.close()
 print(f"    Saved: {cv_plot}")

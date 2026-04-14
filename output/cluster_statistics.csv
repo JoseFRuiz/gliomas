@@ -1,4 +1,10 @@
 Cluster,N_samples,CV_R2,Retained
--1,64,0.23349884556699957,True
-0,6,,False
-1,28,0.2855031260786566,True
+-1,42,-0.23865762096037785,True
+0,5,,True
+1,5,,True
+2,6,,True
+3,5,,False
+4,6,,True
+5,6,,True
+6,14,-1.1469347731764232,True
+7,9,,True
