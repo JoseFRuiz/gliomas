@@ -1,2 +1,2 @@
 classifier,n_features_used_for_classifier_cv,n_splits,train_accuracy_mean,train_accuracy_std,test_accuracy_mean,test_accuracy_std,train_roc_auc_mean,train_roc_auc_std,test_roc_auc_mean,test_roc_auc_std
-RandomForest,1000,5,1.0,0.0,0.9489473684210525,0.001289205127780624,1.0,0.0,0.9345029239766081,0.054690088494681564
+RandomForest,1000,5,1.0,0.0,0.7963157894736842,0.02937954891990075,1.0,0.0,0.8639194139194138,0.06835600612705858

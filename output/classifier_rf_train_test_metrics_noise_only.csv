@@ -1,6 +1,0 @@
-scenario,classifier,fold,n_train,n_test,train_accuracy,test_accuracy,train_roc_auc,test_roc_auc
-noise_only,RandomForest,0,78,20,1.0,0.65,1.0,0.8125
-noise_only,RandomForest,1,78,20,1.0,0.5,1.0,0.3737373737373737
-noise_only,RandomForest,2,78,20,1.0,0.55,1.0,0.7676767676767676
-noise_only,RandomForest,3,79,19,1.0,0.5789473684210527,1.0,0.4090909090909091
-noise_only,RandomForest,4,79,19,1.0,0.6842105263157895,1.0,0.6647727272727273

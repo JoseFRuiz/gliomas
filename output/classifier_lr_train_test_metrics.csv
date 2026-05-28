@@ -1,6 +1,6 @@
 classifier,fold,n_train,n_test,train_accuracy,test_accuracy,train_roc_auc,test_roc_auc
-LogisticRegression,0,78,20,1.0,0.95,1.0,0.9473684210526315
-LogisticRegression,1,78,20,1.0,0.95,1.0,0.9473684210526315
-LogisticRegression,2,78,20,1.0,0.95,1.0,0.9473684210526315
-LogisticRegression,3,79,19,1.0,0.7894736842105263,1.0,0.7777777777777778
-LogisticRegression,4,79,19,1.0,0.8947368421052632,1.0,0.8888888888888888
+LogisticRegression,0,78,20,1.0,0.7,1.0,0.6593406593406594
+LogisticRegression,1,78,20,1.0,0.95,1.0,1.0
+LogisticRegression,2,78,20,1.0,0.85,1.0,0.7857142857142857
+LogisticRegression,3,79,19,1.0,0.7894736842105263,1.0,0.9487179487179488
+LogisticRegression,4,79,19,1.0,0.9473684210526315,1.0,0.9615384615384616

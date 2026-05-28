@@ -21,7 +21,7 @@ matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import matplotlib.patches as mpatches
 
-from sklearn.cluster import HDBSCAN
+from sklearn.cluster import KMeans
 from sklearn.decomposition import PCA
 from sklearn.preprocessing import StandardScaler
 from sklearn.feature_selection import f_regression
@@ -44,23 +44,22 @@ GENE_TPM_PATH        = os.path.join('data', 'TCGAGliomas_RNAm_Filtrado_QC_verif.
 LOG_TRANSFORM        = True          # log(1+x) on survival days
 
 # Feature selection
-N_FEATURES           = 1000          # top features by F-regression for the Ridge model
-N_PCA_COMPONENTS     = 3            # PCA dims fed to HDBSCAN (reduces noise)
+N_FEATURES           = 1000          # top features by F-regression for the regression model
+N_PCA_COMPONENTS     = 20           # PCA dims for K-means clustering (first 2 also used for plots)
 
-# HDBSCAN
-HDBSCAN_MIN_CLUSTER  = 5            # min_cluster_size  (tune: larger → fewer, bigger clusters)
-HDBSCAN_MIN_SAMPLES  = 1            # min_samples       (tune: larger → more noise points)
+# K-means clustering
+N_CLUSTERS           = 20           # number of clusters (tune: more → finer-grained selection)
 
 # Cluster filtering
-LAMBDA_PENALTY       = 0.5          # λ in:  score = R²_cv  -  λ × fraction_removed
-#   • λ=0   → pure R² maximisation (may discard many samples)
+LAMBDA_PENALTY       = 0.0          # λ in:  score = R²_cv  -  λ × fraction_removed
+#   • λ=0   → pure R² maximisation (remove as many clusters as needed)
 #   • λ=1   → equal weight on keeping samples (conservative)
-#   • λ=0.5 → balanced default
-MAX_FRACTION_REMOVE  = 0.50         # hard cap: never discard more than this fraction
+#   • λ=0.1 → weak penalty: prioritise R², tolerate removing many samples
+MAX_FRACTION_REMOVE  = 0.80         # hard cap: never discard more than this fraction
 
 # Regression model
 # Options: 'ridge', 'lasso', 'elasticnet', 'svr', 'rf'
-REGRESSION_MODEL     = 'rf' # 'ridge'
+REGRESSION_MODEL     = 'ridge' # 'ridge'
 RIDGE_ALPHA          = 100.0   # alpha for ridge / lasso / elasticnet
 SVR_C                = 10.0    # C for svr
 RF_REG_ESTIMATORS    = 100     # n_estimators for rf
@@ -153,6 +152,34 @@ def safe_auc(y_true, y_prob):
         return np.nan
 
 
+def get_regression_feature_importance(model, feature_names):
+    """Extract feature relevance from a fitted estimator or Pipeline.
+
+    Returns a DataFrame sorted by descending importance with columns:
+      Feature, Importance  (and Coefficient for linear models).
+    """
+    est = model
+    if hasattr(model, 'named_steps'):
+        est = model.named_steps.get('reg', list(model.named_steps.values())[-1])
+
+    if hasattr(est, 'coef_'):
+        coef = np.asarray(est.coef_).ravel()
+        df = pd.DataFrame({
+            'Feature':     feature_names,
+            'Coefficient': coef,
+            'Importance':  np.abs(coef),
+        })
+    elif hasattr(est, 'feature_importances_'):
+        df = pd.DataFrame({
+            'Feature':    feature_names,
+            'Importance': est.feature_importances_,
+        })
+    else:
+        df = pd.DataFrame({'Feature': feature_names, 'Importance': np.nan})
+
+    return df.sort_values('Importance', ascending=False).reset_index(drop=True)
+
+
 # =============================================================================
 # ── STEP 0 : Load & prepare data ──────────────────────────────────────────────
 # =============================================================================
@@ -182,10 +209,10 @@ selected_features = select_features(X, y, N_FEATURES)
 X_sel = X[selected_features]          # (n_samples × N_FEATURES) DataFrame
 
 # =============================================================================
-# ── STEP 2 : HDBSCAN clustering on PCA-reduced space ─────────────────────────
+# ── STEP 2 : K-means clustering on PCA-reduced space ─────────────────────────
 # =============================================================================
-print(f"\n[2] Clustering with HDBSCAN  (PCA={N_PCA_COMPONENTS} dims, "
-      f"min_cluster_size={HDBSCAN_MIN_CLUSTER}) …")
+print(f"\n[2] Clustering with K-means  (PCA={N_PCA_COMPONENTS} dims, "
+      f"K={N_CLUSTERS}) …")
 
 scaler = StandardScaler()
 X_scaled = scaler.fit_transform(X_sel.values)
@@ -194,16 +221,14 @@ pca = PCA(n_components=N_PCA_COMPONENTS, random_state=RANDOM_STATE)
 X_pca = pca.fit_transform(X_scaled)
 print(f"    PCA variance explained: {pca.explained_variance_ratio_.sum()*100:.1f}%")
 
-hdb = HDBSCAN(min_cluster_size=HDBSCAN_MIN_CLUSTER,
-              min_samples=HDBSCAN_MIN_SAMPLES,
-              cluster_selection_method='leaf')
-cluster_labels = hdb.fit_predict(X_pca)   # -1 = noise / unclustered
+km = KMeans(n_clusters=N_CLUSTERS, random_state=RANDOM_STATE, n_init=20)
+cluster_labels = km.fit_predict(X_pca)   # labels 0 .. N_CLUSTERS-1, no noise
 
 unique_clusters = sorted(set(cluster_labels))
-n_clusters      = sum(1 for c in unique_clusters if c >= 0)
-n_noise         = np.sum(cluster_labels == -1)
+n_clusters      = len(unique_clusters)
+n_noise         = 0   # K-means assigns every sample; no noise points
 
-print(f"    Clusters found : {n_clusters}  (+ {n_noise} noise points labelled -1)")
+print(f"    Clusters found : {n_clusters}  (all samples assigned, no noise points)")
 print(f"    Cluster sizes  : { {c: int(np.sum(cluster_labels==c)) for c in unique_clusters} }")
 
 # Build a Series indexed like y
@@ -310,10 +335,6 @@ for step in range(len(unique_clusters)):
     best_score    = current_score
 
     for cid in list(active_clusters):
-        # Only treat the noise cluster (-1) as a separate experiment (Step 3b),
-        # not as an option inside the greedy removal loop.
-        if cid == -1:
-            continue
         candidate_active = active_clusters - {cid}
         cand_mask  = mask_from_active(candidate_active)
         n_kept     = cand_mask.sum()
@@ -393,6 +414,10 @@ print(f"    Full dataset     →  R²={results_full['mean_score']:.4f} ± "
       f"{results_full['std_score']:.4f}   corr={results_full['correlation']:.4f}")
 print(f"    Retained subset  →  R²={results_retained['mean_score']:.4f} ± "
       f"{results_retained['std_score']:.4f}   corr={results_retained['correlation']:.4f}")
+
+# Feature importance from the regression model fitted on retained samples
+reg_feature_importance = get_regression_feature_importance(
+    results_retained['model'], selected_features)
 
 # =============================================================================
 # ── STEP 6 : Classifier — retained vs. discarded ─────────────────────────────
@@ -513,14 +538,17 @@ else:
     print("    [LR]  Skipped CV (too few samples per class)")
     acc_lr = auc_lr = []
 
-# Fit on full data for coefficients
-pipe_lr.fit(X_clf_arr, y_clf_arr)
-coef_lr = pipe_lr.named_steps['clf'].coef_.ravel()
-lr_importance = pd.DataFrame({
-    'Feature':         selected_features,
-    'LR_Coefficient':  coef_lr,
-    'LR_Abs':          np.abs(coef_lr)
-}).sort_values('LR_Abs', ascending=False).reset_index(drop=True)
+# Fit on full data for coefficients (only when both classes are present)
+if n_neg >= 1:
+    pipe_lr.fit(X_clf_arr, y_clf_arr)
+    coef_lr = pipe_lr.named_steps['clf'].coef_.ravel()
+    lr_importance = pd.DataFrame({
+        'Feature':         selected_features,
+        'LR_Coefficient':  coef_lr,
+        'LR_Abs':          np.abs(coef_lr)
+    }).sort_values('LR_Abs', ascending=False).reset_index(drop=True)
+else:
+    lr_importance = pd.DataFrame(columns=['Feature', 'LR_Coefficient', 'LR_Abs'])
 
 # ── 6b. Random Forest ────────────────────────────────────────────────────────
 print("    [RF]  Random Forest …")
@@ -771,18 +799,21 @@ if n_splits_clf_noise >= 2:
 else:
     print("    [NOISE-ONLY] Skipped CV (too few samples per class)")
 
-# Fit on full data for importances
-pipe_rf.fit(X_clf_arr, y_clf_arr)
-imp_rf = pipe_rf.named_steps['clf'].feature_importances_
-rf_importance = pd.DataFrame({
-    'Feature':    selected_features,
-    'RF_Importance': imp_rf
-}).sort_values('RF_Importance', ascending=False).reset_index(drop=True)
-
-# Merge both into one table
-clf_importance = lr_importance.merge(
-    rf_importance[['Feature', 'RF_Importance']], on='Feature', how='outer'
-).sort_values('LR_Abs', ascending=False).reset_index(drop=True)
+# Fit on full data for importances (only when both classes are present)
+if n_neg >= 1:
+    pipe_rf.fit(X_clf_arr, y_clf_arr)
+    imp_rf = pipe_rf.named_steps['clf'].feature_importances_
+    rf_importance = pd.DataFrame({
+        'Feature':    selected_features,
+        'RF_Importance': imp_rf
+    }).sort_values('RF_Importance', ascending=False).reset_index(drop=True)
+    clf_importance = lr_importance.merge(
+        rf_importance[['Feature', 'RF_Importance']], on='Feature', how='outer'
+    ).sort_values('LR_Abs', ascending=False).reset_index(drop=True)
+else:
+    rf_importance  = pd.DataFrame(columns=['Feature', 'RF_Importance'])
+    clf_importance = pd.DataFrame(columns=['Feature', 'LR_Coefficient', 'LR_Abs', 'RF_Importance'])
+    print("    [SKIP] Both classes required for classifier — no samples were discarded.")
 
 # =============================================================================
 # ── STEP 7 : Plots ────────────────────────────────────────────────────────────
@@ -981,15 +1012,44 @@ if removal_log:
 # =============================================================================
 print(f"\n[8] Saving CSV outputs …")
 
-# Sample membership
+# Sample cluster assignment (all samples)
 membership_df = pd.DataFrame({
-    'SampleID':      X.index,
-    'Cluster':       cluster_labels,
-    'Retained':      retained_mask.astype(int),
-    'Survival_target': y.values
+    'SampleID':       X.index,
+    'Cluster':        cluster_labels,
+    'Retained':       retained_mask.astype(int),
+    'Survival_days':  np.expm1(y.values) if LOG_TRANSFORM else y.values,
 }).set_index('SampleID')
 f = os.path.join(OUTPUT_DIR, 'sample_cluster_membership.csv')
 membership_df.to_csv(f)
+print(f"    {f}")
+
+# Retained samples
+oof_pred = results_retained['predictions']
+oof_pred_series = oof_pred if isinstance(oof_pred, pd.Series) else pd.Series(oof_pred, index=y_ret.index)
+oof_days = np.expm1(oof_pred_series.values) if LOG_TRANSFORM else oof_pred_series.values
+retained_df = pd.DataFrame({
+    'SampleID':            retained_idx,
+    'Cluster':             cluster_labels[retained_mask],
+    'Survival_days':       np.expm1(y.loc[retained_idx].values) if LOG_TRANSFORM else y.loc[retained_idx].values,
+    'OOF_predicted_days':  oof_days,
+}).set_index('SampleID')
+f = os.path.join(OUTPUT_DIR, 'retained_samples.csv')
+retained_df.to_csv(f)
+print(f"    {f}")
+
+# Discarded samples
+discarded_df = pd.DataFrame({
+    'SampleID':       discarded_idx,
+    'Cluster':        cluster_labels[discarded_mask],
+    'Survival_days':  np.expm1(y.loc[discarded_idx].values) if LOG_TRANSFORM else y.loc[discarded_idx].values,
+}).set_index('SampleID')
+f = os.path.join(OUTPUT_DIR, 'discarded_samples.csv')
+discarded_df.to_csv(f)
+print(f"    {f}")
+
+# Regression feature importance (from model fitted on retained subset)
+f = os.path.join(OUTPUT_DIR, f'{REGRESSION_MODEL}_feature_importance.csv')
+reg_feature_importance.to_csv(f, index=False)
 print(f"    {f}")
 
 # Cluster-level stats

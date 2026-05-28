@@ -1,2 +1,2 @@
 classifier,n_features_used_for_classifier_cv,n_splits,train_accuracy_mean,train_accuracy_std,test_accuracy_mean,test_accuracy_std,train_roc_auc_mean,train_roc_auc_std,test_roc_auc_mean,test_roc_auc_std
-LogisticRegression,1000,5,1.0,0.0,0.9068421052631578,0.062465502944999515,1.0,0.0,0.9017543859649123,0.06599642563586376
+LogisticRegression,1000,5,1.0,0.0,0.8473684210526317,0.09550855279245778,1.0,0.0,0.8710622710622712,0.12880341822469035
